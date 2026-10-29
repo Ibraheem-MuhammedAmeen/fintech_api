@@ -3,157 +3,49 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\LedgerAccount;
-use App\Models\LedgerEntry;
-use App\Models\LedgerTransaction;
-use App\Models\WalletFundingRequest;
-use App\Models\WalletTransaction;
-use App\Services\WalletService;
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
-use Illuminate\Validation\ValidationException;
+use App\Http\Requests\DemoFundingRequest;
+use App\Services\DemoFundingService;
+use Illuminate\Http\JsonResponse;
 
+/**
+ * POST /api/v1/wallet/fund-demo
+ *
+ * The controller stays thin: validation happens in DemoFundingRequest,
+ * the money logic happens in DemoFundingService. This method only
+ * connects the two and shapes the JSON response.
+ */
 class DemoFundingController extends Controller
 {
     public function __construct(
-        protected WalletService $walletService
-    ) {
-    }
+        protected DemoFundingService $demoFundingService
+    ) {}
 
-    public function fund(Request $request)
+    public function fund(DemoFundingRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'amount_kobo' => [
-                'required',
-                'integer',
-                'min:100',
-                'max:100000000',
-            ],
-        ]);
+        $validated = $request->validated();
 
-        $amountKobo = (int) $validated['amount_kobo'];
+        $result = $this->demoFundingService->fund(
+            $request->user(),                 // wallet comes from the token, never from the body
+            (int) $validated['amount_kobo'],
+            $validated['idempotency_key'],
+        );
 
-        $wallet = $this->walletService
-            ->getWallet($request->user());
-
-        if ($wallet->status !== 'active') {
-            throw ValidationException::withMessages([
-                'wallet' => 'Your wallet is not active.',
-            ]);
-        }
-
-        $result = DB::transaction(function () use ($wallet, $amountKobo) {
-            // Lock wallet to serialize funding operations.
-            $wallet = $wallet->newQuery()
-                ->whereKey($wallet->id)
-                ->lockForUpdate()
-                ->firstOrFail();
-
-            if ($wallet->status !== 'active') {
-                throw ValidationException::withMessages([
-                    'wallet' => 'Your wallet is not active.',
-                ]);
-            }
-
-            $reference = 'DF-' . Str::uuid();
-
-            // Demo source account: debit.
-            $sourceAccount = LedgerAccount::firstOrCreate(
-                [
-                    'account_code' => 'DEMO-FUNDING-NGN',
-                ],
-                [
-                    'wallet_id' => null,
-                    'account_type' => 'asset',
-                    'currency' => 'NGN',
-                ]
-            );
-
-            // Wallet liability account: credit.
-            $walletAccount = LedgerAccount::firstOrCreate(
-                [
-                    'account_code' => 'WALLET-' . $wallet->id,
-                ],
-                [
-                    'wallet_id' => $wallet->id,
-                    'account_type' => 'liability',
-                    'currency' => $wallet->currency,
-                ]
-            );
-
-            if (
-                $wallet->currency !== 'NGN' ||
-                $sourceAccount->account_type !== 'asset' ||
-                $sourceAccount->currency !== 'NGN' ||
-                $sourceAccount->wallet_id !== null ||
-                $walletAccount->account_type !== 'liability' ||
-                $walletAccount->currency !== $wallet->currency ||
-                (int) $walletAccount->wallet_id !== (int) $wallet->id
-            ) {
-                throw ValidationException::withMessages([
-                    'wallet' => 'Ledger account configuration is invalid.',
-                ]);
-            }
-
-            // Group the accounting entries.
-            $ledgerTransaction = LedgerTransaction::create([
-                'reference' => $reference,
-                'type' => 'demo_funding',
-                'status' => 'posted',
-                'description' => 'Demo wallet funding',
-            ]);
-
-            // Debit the demo funding source.
-            LedgerEntry::create([
-                'ledger_transaction_id' => $ledgerTransaction->id,
-                'ledger_account_id' => $sourceAccount->id,
-                'direction' => 'debit',
-                'amount_kobo' => $amountKobo,
-                'created_at' => now(),
-            ]);
-
-            // Credit the user's wallet liability.
-            LedgerEntry::create([
-                'ledger_transaction_id' => $ledgerTransaction->id,
-                'ledger_account_id' => $walletAccount->id,
-                'direction' => 'credit',
-                'amount_kobo' => $amountKobo,
-                'created_at' => now(),
-            ]);
-
-            // Record the demo funding request.
-            $fundingRequest = WalletFundingRequest::create([
-                'wallet_id' => $wallet->id,
-                'reference' => $reference,
-                'amount_kobo' => $amountKobo,
-                'ledger_transaction_id' => $ledgerTransaction->id,
-            ]);
-
-            // Keep your existing WalletService balance working.
-            WalletTransaction::create([
-                'wallet_id' => $wallet->id,
-                'reference' => $reference,
-                'type' => 'credit',
-                'amount_kobo' => $amountKobo,
-                'description' => 'Demo wallet funding',
-            ]);
-
-            $balanceKobo = $this->walletService
-                ->getBalance($wallet);
-
-            return [
-                'reference' => $reference,
-                'funding_request_id' => $fundingRequest->id,
-                'wallet_id' => $wallet->id,
-                'amount_kobo' => $amountKobo,
-                'balance_kobo' => $balanceKobo,
-            ];
-        }, 3);
+        $funding = $result['funding'];
 
         return response()->json([
-            'message' => 'Demo funding successful.',
-            'data' => $result,
-        ], 201);
+            'message' => $result['replayed']
+                ? 'This request was already processed. No new funds were added.'
+                : 'Demo funding successful.',
+            'data' => [
+                'reference' => $funding->reference,
+                'funding_request_id' => $funding->id,
+                'wallet_id' => $funding->wallet_id,
+                'amount_kobo' => $funding->amount_kobo,
+                'balance_kobo' => $result['balance_kobo'],
+                'idempotency_key' => $funding->idempotency_key,
+                'idempotent_replay' => $result['replayed'],
+                'created_at' => $funding->created_at,
+            ],
+        ], $result['replayed'] ? 200 : 201);
     }
 }

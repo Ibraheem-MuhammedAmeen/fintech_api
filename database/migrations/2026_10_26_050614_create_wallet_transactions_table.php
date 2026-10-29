@@ -8,6 +8,12 @@ return new class extends Migration
 {
     public function up(): void
     {
+        // The table already exists in fintech_db. Without this guard,
+        // `php artisan migrate` would crash with "table already exists".
+        if (Schema::hasTable('wallet_transactions')) {
+            return;
+        }
+
         Schema::create('wallet_transactions', function (Blueprint $table) {
             $table->id();
 
