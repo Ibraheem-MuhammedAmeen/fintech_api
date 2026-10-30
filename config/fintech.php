@@ -17,4 +17,10 @@ return [
         'max_kobo' => 100_000_000,  // ₦1,000,000
     ],
 
+    'transfers' => [
+        // Limits per transfer, in kobo (100 kobo = ₦1).
+        'min_kobo' => 100,          // ₦1
+        'max_kobo' => 100_000_000,  // ₦1,000,000
+    ],
+
 ];

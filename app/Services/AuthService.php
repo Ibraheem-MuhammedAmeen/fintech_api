@@ -6,8 +6,7 @@ use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
-use App\Models\Wallet;
-use Illuminate\Support\Str;
+use App\Support\PhoneNumber;
 
 class AuthService
 {
@@ -18,17 +17,16 @@ class AuthService
             $user = User::create([
                 'name' => $data['name'],
                 'email' => $data['email'],
+                'phone' => $data['phone'],   // already normalised: "08031234567"
                 'password' => Hash::make($data['password']),
             ]);
 
-            do {
-                $walletNumber = '9' . Str::random(9);
-            } while (
-                Wallet::where('wallet_number', $walletNumber)->exists()
-            );
-
+            // OPay style: the account number IS the phone number without
+            // the leading 0. "08031234567" -> "8031234567".
+            // RegisterRequest already checked that it is not taken; the
+            // unique index on wallet_number is the final safety net.
             $user->wallet()->create([
-                'wallet_number' => $walletNumber,
+                'wallet_number' => PhoneNumber::toAccountNumber($data['phone']),
                 'currency' => 'NGN',
                 'status' => 'active',
             ]);
@@ -40,6 +38,7 @@ class AuthService
 
         return [
             'user' => $user,
+            'account_number' => $user->wallet->wallet_number,
             'token' => $token,
         ];
     }

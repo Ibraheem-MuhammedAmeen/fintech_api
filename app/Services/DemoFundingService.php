@@ -3,15 +3,12 @@
 namespace App\Services;
 
 use App\Exceptions\DemoFundingException;
-use App\Models\LedgerAccount;
-use App\Models\LedgerTransaction;
 use App\Models\User;
 use App\Models\Wallet;
 use App\Models\WalletFundingRequest;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
-use LogicException;
 
 /**
  * Adds simulated ("demo") money to a user's wallet.
@@ -27,7 +24,8 @@ use LogicException;
 class DemoFundingService
 {
     public function __construct(
-        protected WalletService $walletService
+        protected WalletService $walletService,
+        protected LedgerService $ledgerService,
     ) {}
 
     /**
@@ -94,43 +92,19 @@ class DemoFundingService
         //    same UUID with a "DF-" prefix, so all rows can be matched up.
         $uuid = (string) Str::uuid();
         $reference = 'DF-' . $uuid;
-        $now = now();
 
-        // 5. Ledger accounts (created the first time, reused afterwards).
-        $demoSource = LedgerAccount::firstOrCreate(
-            ['account_code' => LedgerAccount::DEMO_FUNDING_NGN],
-            ['wallet_id' => null, 'account_type' => 'asset', 'currency' => 'NGN']
-        );
-
-        $walletAccount = LedgerAccount::firstOrCreate(
-            ['account_code' => LedgerAccount::walletCode($wallet->id)],
-            ['wallet_id' => $wallet->id, 'account_type' => 'liability', 'currency' => $wallet->currency]
-        );
-
-        // 6. The ledger transaction and its two balanced entries.
-        $ledgerTransaction = LedgerTransaction::create([
-            'reference' => $reference,
-            'type' => 'demo_funding',
-            'status' => 'posted',
-            'description' => "Demo funding for wallet {$wallet->wallet_number}",
-        ]);
-
-        $ledgerTransaction->entries()->createMany([
+        // 5 + 6. Ledger: debit the demo source, credit the wallet.
+        //        LedgerService creates the accounts the first time, checks
+        //        that debits = credits, and writes the rows.
+        $ledgerTransaction = $this->ledgerService->post(
+            'demo_funding',
+            $reference,
+            "Demo funding for wallet {$wallet->wallet_number}",
             [
-                'ledger_account_id' => $demoSource->id,
-                'direction' => 'debit',
-                'amount_kobo' => $amountKobo,
-                'created_at' => $now,
-            ],
-            [
-                'ledger_account_id' => $walletAccount->id,
-                'direction' => 'credit',
-                'amount_kobo' => $amountKobo,
-                'created_at' => $now,
-            ],
-        ]);
-
-        $this->assertBalanced($ledgerTransaction);
+                ['account' => $this->ledgerService->demoFundingAccount(), 'direction' => 'debit', 'amount_kobo' => $amountKobo],
+                ['account' => $this->ledgerService->walletAccount($wallet), 'direction' => 'credit', 'amount_kobo' => $amountKobo],
+            ]
+        );
 
         // 7. The funding request record.
         $funding = WalletFundingRequest::create([
@@ -181,28 +155,5 @@ class DemoFundingService
             ->whereHas('wallet', fn ($q) => $q->where('user_id', $user->id))
             ->where('idempotency_key', $idempotencyKey)
             ->first();
-    }
-
-    /**
-     * Double-entry rule: total debits must equal total credits.
-     * We re-read the entries from the database and check. If this ever
-     * fails, the exception rolls back the whole transaction.
-     */
-    private function assertBalanced(LedgerTransaction $ledgerTransaction): void
-    {
-        $totals = $ledgerTransaction->entries()
-            ->selectRaw('direction, SUM(amount_kobo) as total')
-            ->groupBy('direction')
-            ->pluck('total', 'direction');
-
-        $debits = (int) ($totals['debit'] ?? 0);
-        $credits = (int) ($totals['credit'] ?? 0);
-
-        if ($debits === 0 || $debits !== $credits) {
-            throw new LogicException(
-                "Ledger transaction {$ledgerTransaction->reference} is unbalanced: "
-                . "debits={$debits}, credits={$credits}."
-            );
-        }
     }
 }

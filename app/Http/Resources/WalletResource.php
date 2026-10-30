@@ -11,6 +11,8 @@ class WalletResource extends JsonResource
     {
         return [
             'id' => $this->id,
+            // The "account number" users share so others can send them money.
+            'wallet_number' => $this->wallet_number,
             'currency' => $this->currency,
             'status' => $this->status,
             'balance_kobo' => $this->balance_kobo,
